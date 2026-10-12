@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: api
+    dns_sd_configs: [{names: [api], type: A, port: 8000}]
+  - job_name: agent-worker          # every replica, discovered through compose DNS
+    dns_sd_configs: [{names: [agent-worker], type: A, port: 9100}]
+  - job_name: verifier
+    dns_sd_configs: [{names: [verifier], type: A, port: 8002}]
+  - job_name: llm-gateway
+    dns_sd_configs: [{names: [llm-gateway], type: A, port: 8001}]
+  - job_name: cadvisor
+    static_configs: [{targets: ["cadvisor:8080"]}]
+  - job_name: prometheus
+    static_configs: [{targets: ["localhost:9090"]}]

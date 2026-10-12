@@ -1,0 +1,21 @@
+#DOC airline_charter
+#TITLE Airline Passenger Charter and Conditions of Carriage (extract)
+#VERSION charter-2025-seed
+#NOTE Development seed modelled on the structure of an Indian scheduled carrier's published passenger charter. Replace with the charter of the airline your team selected (place the PDF in corpus/raw/) and verify clause numbering.
+
+C1 Scope and precedence
+C1.1 This charter sets out the services we provide when your journey is disrupted. It supplements, and does not reduce, the rights given to you by the DGCA Civil Aviation Requirement on facilities to passengers. Where this charter is less favourable to the passenger than the CAR, the CAR prevails.
+C2 Your contact details
+C2.1 Please give us a working mobile number and e-mail address when you book. We use them to tell you about schedule changes, cancellations and delays. If you book through a travel agent, ensure the agent passes your contact details to us.
+C3 Cancellations
+C3.1 If we cancel your flight, we will offer you a free change to another of our flights to the same destination or a full refund. Compensation, where payable, is paid as set out in the CAR.
+C3.2 Compensation is not payable where the cancellation is caused by circumstances beyond our control, including weather, air traffic control restrictions, airport closures, security alerts, strikes, and unforeseen technical faults affecting the safety of the aircraft.
+C4 Delays
+C4.1 If your flight is delayed, we will provide meals and refreshments in line with the CAR and keep you informed through your contact details. Where the delay exceeds six hours you may choose an alternate flight or a full refund.
+C5 Downgrading
+C5.1 If you are carried in a lower class than the one you booked, we will refund the difference between the fare paid and the fare of the class in which you travelled.
+C6 Making a claim
+C6.1 Claims must be submitted within 30 days of the scheduled date of travel with the booking reference and supporting evidence, such as the boarding pass, cancellation message or delay notification.
+C6.2 Where the supporting evidence needed to determine an entitlement is missing, we will ask you for it before deciding the claim.
+C7 Grievances
+C7.1 You may write to our nodal officer. If you are not satisfied with our response, you may escalate the grievance through AirSewa.

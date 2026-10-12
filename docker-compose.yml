@@ -1,0 +1,132 @@
+# docker compose up --build            (first run: builds image, indexes corpus, starts everything)
+# docker compose up --scale agent-worker=3
+# docker compose --profile loadtest up locust
+
+x-app: &app
+  build: .
+  image: claim-triage:latest
+  env_file:
+    - path: .env
+      required: true
+  environment:
+    REDIS_URL: redis://redis:6379/0
+    DATABASE_URL: postgresql://triage:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/triage
+    GATEWAY_URL: http://llm-gateway:8001
+    VERIFIER_URL: http://verifier:8002
+    OTEL_ENDPOINT: http://jaeger:4318/v1/traces
+    INDEX_DIR: /data/index
+    CORPUS_DIR: /corpus
+  volumes:
+    - index:/data
+    - models:/models
+    - ./corpus:/corpus:ro
+    - ./eval:/app/eval
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 20}
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: triage
+      POSTGRES_DB: triage
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U triage"], interval: 5s, timeout: 3s, retries: 20}
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    environment: {COLLECTOR_OTLP_ENABLED: "true"}
+    ports: ["16686:16686"]
+    healthcheck: {test: ["CMD", "wget", "-q", "--spider", "http://localhost:14269/"], interval: 10s, timeout: 3s, retries: 10}
+
+  indexer:
+    <<: *app
+    command: ["python", "-m", "triage.indexer.pipeline"]
+    restart: "no"
+    depends_on:
+      redis: {condition: service_healthy}
+
+  llm-gateway:
+    <<: *app
+    command: ["uvicorn", "triage.gateway.main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
+    volumes: []
+    ports: ["8001:8001"]
+    healthcheck: {test: ["CMD", "curl", "-fs", "http://localhost:8001/health"], interval: 10s, timeout: 3s, retries: 10}
+
+  verifier:
+    <<: *app
+    command: ["uvicorn", "triage.verifier.main:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "2"]
+    depends_on:
+      indexer: {condition: service_completed_successfully}
+      llm-gateway: {condition: service_healthy}
+    healthcheck: {test: ["CMD", "curl", "-fs", "http://localhost:8002/health"], interval: 10s, timeout: 3s, retries: 10}
+
+  agent-worker:
+    <<: *app
+    command: ["python", "-m", "triage.agent.worker"]
+    depends_on:
+      indexer: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      llm-gateway: {condition: service_healthy}
+      verifier: {condition: service_healthy}
+    healthcheck: {test: ["CMD", "curl", "-fs", "http://localhost:9100/metrics"], interval: 10s, timeout: 3s, retries: 30, start_period: 60s}
+
+  api:
+    <<: *app
+    command: ["uvicorn", "triage.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    ports: ["8000:8000"]
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      llm-gateway: {condition: service_healthy}
+    healthcheck: {test: ["CMD", "curl", "-fs", "http://localhost:8000/health"], interval: 10s, timeout: 3s, retries: 10}
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes: [./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
+    ports: ["9090:9090"]
+    healthcheck: {test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/ready"], interval: 10s, timeout: 3s, retries: 10}
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    privileged: true
+    command: ["--docker_only=true", "--housekeeping_interval=5s"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+  locust:
+    image: locustio/locust:2.31.5
+    profiles: ["loadtest"]
+    volumes: [./loadtest:/mnt/locust]
+    command: >
+      -f /mnt/locust/locustfile.py --host http://api:8000 --headless
+      -u ${LOCUST_USERS:-10} -r ${LOCUST_SPAWN_RATE:-2} -t ${LOCUST_DURATION:-3m}
+      --csv /mnt/locust/results/run_u${LOCUST_USERS:-10}
+    depends_on:
+      api: {condition: service_healthy}
+
+volumes:
+  index:
+  models:
+  pgdata:

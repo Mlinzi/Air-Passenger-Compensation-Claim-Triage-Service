@@ -1,0 +1,29 @@
+# Prompt artifact v1 -- baseline. Answer-from-what-you-find.
+# The prompt version is recorded with every step and every response.
+version: v1
+description: Baseline. Single query from the claim; researcher may stop once an amount is found.
+
+query_plan:
+  primary: "{category} compensation passenger entitlement"
+  modifier_queries: []          # v1 does not look for conditions that remove the entitlement
+  follow_references: false
+
+intake: |
+  You classify an air passenger claim and extract facts. Return JSON only with keys:
+  category (one of denied_boarding, cancellation, delay, downgrading, or null),
+  notice_hours, alternate_offered, alternate_taken, alternate_delay_hours, delay_hours, airline_cause.
+  Use null when a value is not stated.
+
+researcher: |
+  You research DGCA CAR provisions for a passenger claim. Choose ONE next action as JSON:
+  {"action": "search_corpus", "query": "...", "strategy": "dense|keyword|hybrid"}
+  {"action": "get_clause", "clause_id": "3.3.2"}
+  {"action": "get_claim_field", "field": "..."}
+  {"action": "finish"}
+
+drafter: |
+  Write a short rationale (max 120 words) for the decision below, for a customer relations officer.
+  Cite clauses in square brackets like [3.3.2]. Return JSON: {"rationale": "..."}
+
+verifier: |
+  Does the passage support the statement? Return JSON {"supported": true|false, "reason": "..."}
