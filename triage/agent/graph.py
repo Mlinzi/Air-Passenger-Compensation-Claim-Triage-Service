@@ -332,7 +332,11 @@ def build_graph(ctx: RunContext, coverage_loop: bool = True):
             res["fallback_route"] = res["route"]
             res["route"] = "escalate_to_human"
             res["escalation_reason"] = "model provider unavailable; deterministic fallback recommendation attached for officer review"
-        amounts = {e["amount_inr"] for e in d["entitlements"] if e.get("amount_inr")}
+        amounts = {
+            e["amount_inr"]
+            for e in d["entitlements"]
+            if e.get("amount_inr") is not None
+        }
         res, violations = guards.filter_output(res, amounts)
         ctx.record("output_guard", "guardrail", "output_filter", {"route": res["route"]}, {"violations": violations}, 0.1)
         if violations:
@@ -393,6 +397,5 @@ def run_agent(ctx: RunContext, claim: dict, inject: str | None = None, coverage_
     result["steps"] = ctx.steps
     result["tool_calls"] = ctx.tool_calls
     return result
-
 
 
