@@ -147,7 +147,28 @@ The `full_run` row in `loadtest/results/*_stats.csv` is submission-to-final-resu
 * Re-index: `docker compose run --rm indexer` is incremental. `... indexer python -m triage.indexer.pipeline --reembed car_m_iv` re-embeds one document only.
 * [Runbook](docs/runbook.md) · [Incident log](docs/incident_log.md) · [Architecture](docs/architecture.md) · [Report](docs/report.md)
 
-## 6. Repository layout
+## 6. API validation and guardrails
+
+`POST /claims` quarantines malformed JSON and schema-invalid objects, returning `422` with field
+errors and no agent run. If rate limiting, persistence, or queueing is unavailable, the API returns
+a safe `503` response. Rate limiting uses the server-observed client address; `X-Client-ID` is
+honored only when `DEMO_MODE=true` for local load tests. Prompt-injection screening keeps passenger
+text untrusted, and output amounts must match computed entitlements; statutory cap references are
+accepted only for the existing DGCA caps and when stated as caps/limits.
+
+## 7. Automated tests
+
+Install the development dependencies and run the local, service-mocked tests:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The API tests mock persistence, rate limiting, and queue operations; they do not require live Redis,
+Postgres, an LLM gateway, or a verifier.
+
+## 8. Repository layout
 
 ```
 triage/api         FastAPI: contract validation, quarantine, rate limit, queueing, results, trace, feedback, web client
