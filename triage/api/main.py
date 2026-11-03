@@ -5,6 +5,7 @@ Redis and returns 202 + run_id immediately; the caller polls GET /runs/{run_id}.
 chosen over callbacks because the callers (the web client, Locust, an analyst's tool) are not
 reachable from inside the deployment, and polling needs no inbound endpoint, retry or signing.
 """
+import json
 import logging
 import os
 import time
@@ -52,19 +53,71 @@ def startup():
 @app.middleware("http")
 async def observe(request: Request, call_next):
     corr = request.headers.get("X-Correlation-ID") or uuid.uuid4().hex
-    correlation_id.set(corr)
+    token = correlation_id.set(corr)
+    run_token = run_id_var.set("-")
     t0 = time.time()
-    response = await call_next(request)
-    route = request.scope.get("route")
-    path = getattr(route, "path", "other")
-    HTTP_REQUESTS.labels("api", path, str(response.status_code)).inc()
-    HTTP_LATENCY.labels("api", path).observe(time.time() - t0)
-    response.headers["X-Correlation-ID"] = corr
-    return response
+    try:
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception("unhandled API request failure")
+            response = JSONResponse({"error": "internal_error"}, status_code=500)
+
+        route = request.scope.get("route")
+        path = getattr(route, "path", "other")
+        HTTP_REQUESTS.labels("api", path, str(response.status_code)).inc()
+        HTTP_LATENCY.labels("api", path).observe(time.time() - t0)
+        response.headers["X-Correlation-ID"] = corr
+        return response
+    finally:
+        correlation_id.reset(token)
+        run_id_var.reset(run_token)
 
 
 def client_of(request: Request, x_client_id: str | None) -> str:
-    return x_client_id or (request.client.host if request.client else "anonymous")
+    if s.demo_mode and isinstance(x_client_id, str):
+        client_id = x_client_id.strip()
+        if client_id and len(client_id) <= 128:
+            return "demo:" + client_id
+    return request.client.host if request.client else "anonymous"
+
+
+def _quarantine_invalid_request(client: str, payload: dict, errors: list[dict]):
+    try:
+        qid = db.quarantine(
+            correlation_id.get(),
+            client,
+            payload,
+            errors,
+            CONTRACT_VERSION,
+        )
+    except Exception:
+        logger.exception("failed to persist invalid claim quarantine")
+        return JSONResponse({"error": "service_unavailable"}, status_code=503)
+
+    QUARANTINED.inc()
+    log(
+        logger,
+        "claim quarantined; no agent run started",
+        quarantine_id=qid,
+        field_count=len(errors),
+    )
+    return JSONResponse(
+        {
+            "error": "invalid_request",
+            "quarantine_id": qid,
+            "errors": errors,
+            "agent_run_started": False,
+        },
+        status_code=422,
+    )
+
+
+def _mark_run_failed(run_id: str) -> None:
+    try:
+        db.update_run(run_id, status="failed", finished_at=time.time())
+    except Exception:
+        logger.exception("failed to mark run as failed")
 
 
 @app.get("/", include_in_schema=False)
@@ -82,39 +135,80 @@ def contract():
 @app.post("/claims", status_code=202)
 async def submit(request: Request, x_client_id: str | None = Header(default=None), inject: str | None = None):
     client = client_of(request, x_client_id)
-    allowed, remaining = cache.rate_limit(client)
+    try:
+        allowed, remaining = cache.rate_limit(client)
+    except Exception:
+        logger.exception("claim rate-limit service unavailable")
+        return JSONResponse({"error": "service_unavailable"}, status_code=503)
     if not allowed:
         RATE_LIMITED.inc()
         return JSONResponse({"error": "rate_limited", "detail": f"limit {s.rate_limit_per_min}/min per client"},
                             status_code=429, headers={"Retry-After": "60"})
+
+    raw_body = await request.body()
     try:
-        body = await request.json()
-    except Exception:
-        body = None
+        body = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        raw = raw_body.decode(errors="replace")[:5000]
+        return _quarantine_invalid_request(
+            client,
+            {"raw": raw},
+            [{"field": "body", "msg": "body must contain valid JSON", "type": "json_invalid"}],
+        )
+
     if not isinstance(body, dict):
-        qid = db.quarantine(correlation_id.get(), client, {"raw": (await request.body()).decode(errors="replace")[:5000]},
-                            [{"loc": ["body"], "msg": "body must be a JSON object"}], CONTRACT_VERSION)
-        QUARANTINED.inc()
-        return JSONResponse({"error": "invalid_request", "quarantine_id": qid,
-                             "errors": [{"field": "body", "msg": "body must be a JSON object"}]}, status_code=422)
+        raw = raw_body.decode(errors="replace")[:5000]
+        return _quarantine_invalid_request(
+            client,
+            {"raw": raw},
+            [{"field": "body", "msg": "body must be a JSON object", "type": "object_required"}],
+        )
+
     try:
         claim = ClaimRequest.model_validate(body)
     except ValidationError as e:
-        errors = [{"field": ".".join(str(x) for x in err["loc"]) or "claim", "msg": err["msg"], "type": err["type"]}
-                  for err in e.errors()]
-        qid = db.quarantine(correlation_id.get(), client, body, errors, CONTRACT_VERSION)
-        QUARANTINED.inc()
-        log(logger, "claim quarantined; no agent run started", quarantine_id=qid, errors=errors)
-        return JSONResponse({"error": "invalid_request", "quarantine_id": qid, "errors": errors,
-                             "agent_run_started": False}, status_code=422)
+        errors = [
+            {
+                "field": ".".join(str(x) for x in err["loc"]) or "claim",
+                "msg": err["msg"],
+                "type": err["type"],
+            }
+            for err in e.errors(include_input=False)
+        ]
+        return _quarantine_invalid_request(client, body, errors)
+
     if inject and not s.demo_mode:
         inject = None
     run_id = "run_" + uuid.uuid4().hex[:16]
     run_id_var.set(run_id)
     payload = claim.model_dump(mode="json")
-    db.create_run(run_id, correlation_id.get(), client, payload, s.prompt_version)
-    queue.enqueue("triage.agent.worker.process_run", run_id, payload, s.prompt_version, correlation_id.get(), inject,
-                  job_id=run_id, job_timeout=int(s.agent_wall_clock_s * 2 + 60), result_ttl=3600)
+    try:
+        db.create_run(run_id, correlation_id.get(), client, payload, s.prompt_version)
+    except Exception:
+        logger.exception("failed to persist claim run")
+        _mark_run_failed(run_id)
+        return JSONResponse({"error": "service_unavailable"}, status_code=503)
+
+    try:
+        queue.enqueue(
+            "triage.agent.worker.process_run",
+            run_id,
+            payload,
+            s.prompt_version,
+            correlation_id.get(),
+            inject,
+            job_id=run_id,
+            job_timeout=int(s.agent_wall_clock_s * 2 + 60),
+            result_ttl=3600,
+        )
+    except Exception:
+        logger.exception("failed to enqueue persisted claim run")
+        _mark_run_failed(run_id)
+        return JSONResponse(
+            {"error": "service_unavailable", "run_id": run_id},
+            status_code=503,
+        )
+
     log(logger, "run queued", client=client)
     return {"run_id": run_id, "status": "queued", "status_url": f"/runs/{run_id}",
             "rate_limit_remaining": remaining}
@@ -207,8 +301,22 @@ def health():
         except Exception as e:
             checks[name] = f"fail: {type(e).__name__}"
     checks["index_manifest"] = os.path.exists(os.path.join(s.index_dir, "manifest.json"))
-    checks["queue_depth"] = len(queue) if checks["redis"] == "ok" else None
-    healthy = checks["redis"] == "ok" and checks["postgres"] == "ok"
+    if checks["redis"] == "ok":
+        try:
+            checks["queue_depth"] = len(queue)
+        except Exception as e:
+            logger.exception("failed to inspect run queue")
+            checks["queue_depth"] = f"fail: {type(e).__name__}"
+    else:
+        checks["queue_depth"] = None
+    healthy = (
+        checks["redis"] == "ok"
+        and checks["postgres"] == "ok"
+        and not (
+            isinstance(checks["queue_depth"], str)
+            and checks["queue_depth"].startswith("fail:")
+        )
+    )
     return JSONResponse({"status": "ok" if healthy else "degraded", "checks": checks}, status_code=200 if healthy else 503)
 
 
@@ -217,6 +325,5 @@ def metrics():
     try:
         QUEUE_DEPTH.set(len(queue))
     except Exception:
-        pass
+        logger.exception("failed to collect run queue depth")
     return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
